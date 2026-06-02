@@ -12,18 +12,18 @@
  * plus structural/shape checks.
  */
 
-jest.mock("../../../../../lib/api/batchScan");
+jest.mock("../../../../lib/api/batchScan");
 
 import { POST } from "../route";
-import { handleBatchScan } from "../../../../../lib/api/batchScan";
-import { DEFAULT_CONFIG } from "../../../../../lib/security/rateLimiter";
-import type { BatchScanSuccessBody, BatchScanErrorBody } from "../../../../../lib/api/batchScan";
+import { handleBatchScan } from "../../../../lib/api/batchScan";
+import { DEFAULT_CONFIG } from "../../../../lib/security/rateLimiter";
+import type { BatchScanSuccessBody, BatchScanErrorBody } from "../../../../lib/api/batchScan";
 
 const mockHandleBatchScan = handleBatchScan as jest.Mock;
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const ROUTE_URL = "http://localhost/api/tools/url-activity-scanner";
+const ROUTE_URL = "http://localhost/tools/url-activity-scanner/api/scan";
 const VALID_URLS = ["https://example.com", "https://example.org"];
 
 // ─── Fixture builders ─────────────────────────────────────────────────────────

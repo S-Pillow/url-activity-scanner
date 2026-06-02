@@ -46,7 +46,7 @@ jest.mock("next/link", () => {
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const API_ENDPOINT = "/api/tools/url-activity-scanner";
+const API_ENDPOINT = "/tools/url-activity-scanner/api/scan";
 
 // ─── Fixture helpers ──────────────────────────────────────────────────────────
 
