@@ -1,0 +1,95 @@
+.main {
+  min-height: 100vh;
+  padding: 3rem 1.5rem;
+  max-width: 900px;
+  margin: 0 auto;
+}
+
+.header {
+  margin-bottom: 2.5rem;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 1.5rem;
+}
+
+.siteTitle {
+  font-size: 1.75rem;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: -0.01em;
+}
+
+.subtitle {
+  color: var(--text-muted);
+  margin-top: 0.4rem;
+  font-size: 0.95rem;
+}
+
+.toolGrid {
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 1rem;
+}
+
+.toolCard {
+  display: block;
+  text-decoration: none;
+  color: inherit;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.toolCard:hover,
+.toolCard:focus-visible {
+  border-color: var(--accent-dim);
+  box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.12);
+}
+
+.toolCardInner {
+  padding: 1.25rem 1.5rem;
+  position: relative;
+}
+
+.toolBadge {
+  display: inline-block;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--accent);
+  background: rgba(88, 166, 255, 0.12);
+  border: 1px solid rgba(88, 166, 255, 0.25);
+  border-radius: 4px;
+  padding: 0.1rem 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.toolTitle {
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 0.5rem;
+}
+
+.toolDescription {
+  font-size: 0.875rem;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.toolArrow {
+  position: absolute;
+  bottom: 1.25rem;
+  right: 1.5rem;
+  color: var(--text-muted);
+  font-size: 1rem;
+  transition: color 0.15s, transform 0.15s;
+}
+
+.toolCard:hover .toolArrow,
+.toolCard:focus-visible .toolArrow {
+  color: var(--accent);
+  transform: translateX(3px);
+}
