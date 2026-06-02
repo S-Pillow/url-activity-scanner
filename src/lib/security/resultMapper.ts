@@ -70,18 +70,29 @@ export const RESULT_KEY = {
   UNKNOWN:           "Unknown",
 } as const;
 
-/** Maps each user-facing result string to its AIPF-001 human-readable meaning. */
+/**
+ * Maps each user-facing result string to its AIPF-001 human-readable meaning.
+ *
+ * AIPF-006B/010B changes:
+ *   SERVER_ERROR — updated from "Server responded but failed to process the
+ *     request" to "Server or CDN responded with an error to this scanner
+ *     request". Large protected sites may return 5xx to bot-like requests
+ *     even when the site is fully operational for normal browsers.
+ *   TIMEOUT — updated from "Server did not respond" to "Server did not respond
+ *     to the scanner request" for the same reason: the wording must reflect
+ *     the scanner's perspective, not a claim about the site's health.
+ */
 export const MEANINGS: Readonly<Record<string, string>> = {
   [RESULT_KEY.OK]:                "Content likely exists",
   [RESULT_KEY.REDIRECT]:          "URL redirects somewhere active",
   [RESULT_KEY.FORBIDDEN]:         "Server exists, but access is blocked",
   [RESULT_KEY.NOT_FOUND]:         "No content at that path",
   [RESULT_KEY.GONE]:              "Content used to exist but is gone",
-  [RESULT_KEY.TIMEOUT]:           "Server did not respond",
+  [RESULT_KEY.TIMEOUT]:           "Server did not respond to the scanner request",
   [RESULT_KEY.DNS_FAILURE]:       "Domain does not resolve",
   [RESULT_KEY.CONNECTION_REFUSED]:"Host exists but service may be down",
   [RESULT_KEY.BLOCKED]:           "URL points to a private, internal, unsupported, or unsafe destination",
-  [RESULT_KEY.SERVER_ERROR]:      "Server responded but failed to process the request",
+  [RESULT_KEY.SERVER_ERROR]:      "Server or CDN responded with an error to this scanner request",
   [RESULT_KEY.UNKNOWN]:           "The URL responded in an unexpected way",
 };
 
@@ -146,7 +157,19 @@ function mapStatusCode(code: number): IntermediateResult {
   if (code === 401 || code === 403) return mk(RESULT_KEY.FORBIDDEN);
   if (code === 404) return mk(RESULT_KEY.NOT_FOUND);
   if (code === 410) return mk(RESULT_KEY.GONE);
-  if (code >= 500 && code < 600) return mk(RESULT_KEY.SERVER_ERROR, `Server returned ${code}`);
+  if (code >= 500 && code < 600) {
+    // AIPF-006B: 503 often indicates CDN or bot-protection rejection rather
+    // than a genuine server outage. Use a note that explains the scanner
+    // context so users do not incorrectly conclude the site is down.
+    if (code === 503) {
+      return mk(
+        RESULT_KEY.SERVER_ERROR,
+        "Server returned 503. This may happen when a CDN, bot protection system, " +
+        "or origin server rejects non-browser scanner requests."
+      );
+    }
+    return mk(RESULT_KEY.SERVER_ERROR, `Server returned ${code}`);
+  }
   return mk(RESULT_KEY.UNKNOWN);
 }
 

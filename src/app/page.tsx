@@ -39,6 +39,77 @@
 
 import { useState } from "react";
 import styles from "./page.module.css";
+import { buildCsv, buildCsvFilename } from "./csvExport";
+import type { ScanResult } from "./csvExport";
+
+// ─── Result key entries ───────────────────────────────────────────────────────
+
+/**
+ * The canonical AIPF-001 result key.
+ * Must stay in sync with RESULT_KEY / MEANINGS in resultMapper.ts.
+ * Used to render the result legend on the page (client-side only).
+ *
+ * A-AIPF010-01: Color is not the sole indicator of result type.
+ *   Every badge also shows the result text.
+ */
+// AIPF-006B/010B: Server error and Timeout meanings updated to reflect that
+// results describe the scanner's interaction, not the site's overall health.
+const RESULT_KEY_ENTRIES = [
+  { result: "200 OK",             meaning: "Content likely exists"                                                  },
+  { result: "301/302 Redirect",   meaning: "URL redirects somewhere active"                                         },
+  { result: "403 Forbidden",      meaning: "Server exists, but access is blocked"                                   },
+  { result: "404 Not Found",      meaning: "No content at that path"                                                },
+  { result: "410 Gone",           meaning: "Content used to exist but is gone"                                      },
+  { result: "Timeout",            meaning: "Server did not respond to the scanner request"                          },
+  { result: "DNS failure",        meaning: "Domain does not resolve"                                                 },
+  { result: "Connection refused", meaning: "Host exists but service may be down"                                    },
+  { result: "Blocked",            meaning: "URL points to a private, internal, unsupported, or unsafe destination" },
+  { result: "Server error",       meaning: "Server or CDN responded with an error to this scanner request"          },
+  { result: "Unknown",            meaning: "The URL responded in an unexpected way"                                  },
+] as const;
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/**
+ * Converts the backend ISO 8601 UTC timestamp into a locale-neutral
+ * "YYYY-MM-DD HH:mm:ss UTC" string for clear audit-context display.
+ *
+ * A-AIPF010-02: UTC is used explicitly so that no timezone conversion
+ * obscures the scan time. Falls back to the raw string on parse failure.
+ */
+function formatCheckedAt(iso: string): string {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  const p = (n: number) => String(n).padStart(2, "0");
+  return (
+    `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} ` +
+    `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())} UTC`
+  );
+}
+
+/**
+ * Maps a backend result string to its CSS-module badge variant class.
+ *
+ * Color categories (per AIPF-010 visual requirements):
+ *   Green  → 200 OK
+ *   Cyan   → 301/302 Redirect
+ *   Amber  → 403 Forbidden, Connection refused, Blocked
+ *   Red    → Timeout, DNS failure, Server error
+ *   Gray   → 404, 410, Unknown
+ */
+function resultBadgeClass(result: string): string {
+  switch (result) {
+    case "200 OK":              return styles.resultBadgeOk;
+    case "301/302 Redirect":    return styles.resultBadgeRedirect;
+    case "403 Forbidden":
+    case "Connection refused":
+    case "Blocked":             return styles.resultBadgeWarning;
+    case "Timeout":
+    case "DNS failure":
+    case "Server error":        return styles.resultBadgeError;
+    default:                    return styles.resultBadgeNeutral;
+  }
+}
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -58,15 +129,8 @@ const API_ENDPOINT = "/tools/url-activity-scanner/api/scan";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-interface ScanResult {
-  original_input: string;
-  normalized_url: string | null;
-  result: string;
-  meaning: string;
-  redirected_to: string | null;
-  checked_at: string;
-  notes: string | null;
-}
+// ScanResult is imported from ./csvExport (AIPF-011) to avoid duplication.
+// ApiSuccess and ApiError are local; they wrap ScanResult for API responses.
 
 interface ApiSuccess {
   ok: true;
@@ -146,6 +210,33 @@ export default function UrlActivityScannerPage() {
     }
   };
 
+  /**
+   * AIPF-011: Client-side CSV export.
+   *
+   * Uses only the in-memory results already displayed on this page.
+   * No server request is made. The Blob is created, linked, clicked, and
+   * URL-revoked entirely in the browser.
+   *
+   * A-AIPF011-05: document.body.appendChild + .click() + removeChild is the
+   *   standard cross-browser method for triggering a named file download.
+   *   The anchor is added and removed synchronously so it never persists in
+   *   the DOM after the handler returns.
+   */
+  const handleExport = () => {
+    if (!results || results.length === 0) return;
+    const csv = buildCsv(results);
+    const filename = buildCsvFilename();
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.setAttribute("download", filename);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <main className={styles.main}>
       <div className={styles.card}>
@@ -221,49 +312,112 @@ export default function UrlActivityScannerPage() {
           </button>
         </form>
 
+        {/* ── Result key ───────────────────────────────────────────────────────
+            Always visible. Lists every result code with its AIPF-001 meaning.
+            A-AIPF010-01: Color is reinforced by text — never the sole signal. */}
+        <section aria-label="Result key" className={styles.resultKey}>
+          <h2 className={styles.resultKeyHeading}>Result key</h2>
+          <ul className={styles.resultKeyList}>
+            {RESULT_KEY_ENTRIES.map(({ result, meaning }) => (
+              <li key={result} className={styles.resultKeyEntry}>
+                <span className={`${styles.resultBadge} ${resultBadgeClass(result)}`}>
+                  {result}
+                </span>
+                <span className={styles.resultKeyMeaning}>{meaning}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+
         {/* ── Results ──────────────────────────────────────────────────────────
             A-AIPF009-05: Plain <span> elements — never <a> tags.
-            AIPF-010 will replace this with the polished result table. */}
+            A-AIPF010-03: normalized_url is shown only when it differs from
+              original_input to avoid displaying identical text twice.
+            A-AIPF010-04: checked_at is formatted as YYYY-MM-DD HH:mm:ss UTC
+              for unambiguous locale-neutral audit context. */}
         {results !== null && (
           <section aria-label="Scan results" className={styles.results}>
-            <h2 className={styles.resultsTitle}>
-              Results — {results.length} URL{results.length !== 1 ? "s" : ""}
-            </h2>
+            <div className={styles.resultsHeader}>
+              <h2 className={styles.resultsTitle}>
+                Results — {results.length} URL{results.length !== 1 ? "s" : ""}
+              </h2>
+              {/*
+               * AIPF-011: Export button. Only rendered when results exist.
+               * Client-side download only — no server request is made.
+               */}
+              <button
+                type="button"
+                onClick={handleExport}
+                className={styles.exportButton}
+              >
+                Export CSV
+              </button>
+            </div>
+            {/*
+             * A-AIPF012-02: Export notice includes the server-side
+             * clarification required by AIPF-012 ("The server does not
+             * generate or save the CSV file.").
+             */}
+            <p className={styles.exportHint}>
+              CSV export is generated in your browser from the temporary results
+              currently shown on this page. The server does not generate or save
+              the CSV file.
+            </p>
             <ul className={styles.resultList}>
               {results.map((r, index) => (
                 <li key={index} className={styles.resultItem}>
+
                   <div className={styles.resultRow}>
                     <span className={styles.resultLabel}>Input</span>
                     <span className={styles.resultValue}>{r.original_input}</span>
                   </div>
+
+                  {/*
+                   * A-AIPF010-03: Only shown when normalized_url differs from
+                   * original_input. Identical values add no informational value.
+                   * Neither field is ever wrapped in an <a> tag.
+                   */}
+                  {r.normalized_url !== null &&
+                   r.normalized_url !== r.original_input && (
+                    <div className={styles.resultRow}>
+                      <span className={styles.resultLabel}>Normalized</span>
+                      <span className={styles.resultValue}>{r.normalized_url}</span>
+                    </div>
+                  )}
+
                   <div className={styles.resultRow}>
                     <span className={styles.resultLabel}>Result</span>
-                    <span className={`${styles.resultValue} ${styles.resultCode}`}>
+                    <span className={`${styles.resultBadge} ${resultBadgeClass(r.result)}`}>
                       {r.result}
                     </span>
                   </div>
+
                   <div className={styles.resultRow}>
                     <span className={styles.resultLabel}>Meaning</span>
                     <span className={styles.resultValue}>{r.meaning}</span>
                   </div>
+
                   {r.redirected_to !== null && (
                     <div className={styles.resultRow}>
                       <span className={styles.resultLabel}>Redirected to</span>
                       <span className={styles.resultValue}>{r.redirected_to}</span>
                     </div>
                   )}
+
                   {r.notes !== null && (
                     <div className={styles.resultRow}>
                       <span className={styles.resultLabel}>Notes</span>
                       <span className={styles.resultValue}>{r.notes}</span>
                     </div>
                   )}
+
                   <div className={styles.resultRow}>
                     <span className={styles.resultLabel}>Checked at</span>
                     <span className={styles.resultValue}>
-                      {new Date(r.checked_at).toLocaleString()}
+                      {formatCheckedAt(r.checked_at)}
                     </span>
                   </div>
+
                 </li>
               ))}
             </ul>

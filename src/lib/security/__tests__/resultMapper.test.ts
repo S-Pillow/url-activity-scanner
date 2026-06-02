@@ -616,3 +616,96 @@ describe("12. Shape and contract verification", () => {
     }
   });
 });
+
+// ─── 13. AIPF-006B/010B: Improved result meaning text (tests 52–60) ──────────
+
+describe("13. AIPF-006B/010B: Improved result meaning text", () => {
+  // ── MEANINGS accuracy ────────────────────────────────────────────────────────
+
+  it("MEANINGS[SERVER_ERROR] uses scanner-perspective wording (test 52)", () => {
+    expect(MEANINGS[RESULT_KEY.SERVER_ERROR]).toBe(
+      "Server or CDN responded with an error to this scanner request"
+    );
+  });
+
+  it("MEANINGS[TIMEOUT] uses scanner-perspective wording (test 53)", () => {
+    expect(MEANINGS[RESULT_KEY.TIMEOUT]).toBe(
+      "Server did not respond to the scanner request"
+    );
+  });
+
+  // ── 503 note ─────────────────────────────────────────────────────────────────
+
+  it("HEAD 503 note includes CDN/bot-protection context (test 54)", () => {
+    const r = mapResult({ headResult: makeHead("HEAD_OK", 503) }, { now: fixedNow });
+    expect(r.result).toBe(RESULT_KEY.SERVER_ERROR);
+    expect(r.notes).toContain("503");
+    expect(r.notes).toContain("CDN");
+    expect(r.notes).toContain("bot protection");
+  });
+
+  it("HEAD 503 meaning uses the improved wording (test 55)", () => {
+    const r = mapResult({ headResult: makeHead("HEAD_OK", 503) }, { now: fixedNow });
+    expect(r.meaning).toBe(MEANINGS[RESULT_KEY.SERVER_ERROR]);
+  });
+
+  it("GET fallback 503 after HEAD 405 → Server error with both HEAD note and CDN note (test 56)", () => {
+    const r = mapResult(
+      {
+        headResult: makeHead("HEAD_OK", 405),
+        getFallbackResult: makeGetFallback("GET_FALLBACK_OK", 503),
+      },
+      { now: fixedNow }
+    );
+    expect(r.result).toBe(RESULT_KEY.SERVER_ERROR);
+    expect(r.notes).toContain("HEAD returned 405");
+    expect(r.notes).toContain("GET fallback used");
+    expect(r.notes).toContain("503");
+    expect(r.notes).toContain("CDN");
+  });
+
+  // ── No overclaiming ───────────────────────────────────────────────────────────
+
+  it("No MEANINGS value claims the site is down (test 57)", () => {
+    // Guard against broad overclaiming phrases; individual words like "down"
+    // appearing in approved phrasings (e.g. "service may be down") are fine.
+    const forbidden = [/website is offline/i, /site is offline/i, /site is down/i, /website is down/i, /site is broken/i];
+    for (const meaning of Object.values(MEANINGS)) {
+      for (const pattern of forbidden) {
+        expect(meaning).not.toMatch(pattern);
+      }
+    }
+  });
+
+  it("No MEANINGS value claims the site is safe or unsafe in an absolute sense (test 58)", () => {
+    // "unsafe destination" (BLOCKED meaning) is approved language describing
+    // the URL category, not a content-safety verdict. Only absolute verdict
+    // phrases are forbidden.
+    const forbidden = [/site is safe/i, /site is malicious/i, /proves.*safe/i, /proves.*malicious/i, /illegal content/i];
+    for (const meaning of Object.values(MEANINGS)) {
+      for (const pattern of forbidden) {
+        expect(meaning).not.toMatch(pattern);
+      }
+    }
+  });
+
+  it("No 503 note claims the site is down (test 59)", () => {
+    const r = mapResult(
+      {
+        headResult: makeHead("HEAD_OK", 405),
+        getFallbackResult: makeGetFallback("GET_FALLBACK_OK", 503),
+      },
+      { now: fixedNow }
+    );
+    const notes = r.notes ?? "";
+    expect(notes).not.toMatch(/offline/i);
+    expect(notes).not.toMatch(/is down/i);
+    expect(notes).not.toMatch(/broken/i);
+  });
+
+  it("503 result remains Server error, not 200 OK (test 60)", () => {
+    const r = mapResult({ headResult: makeHead("HEAD_OK", 503) }, { now: fixedNow });
+    expect(r.result).toBe(RESULT_KEY.SERVER_ERROR);
+    expect(r.result).not.toBe(RESULT_KEY.OK);
+  });
+});

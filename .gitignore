@@ -1,35 +1,51 @@
-# Next.js build output
+# ─── Next.js build outputs ────────────────────────────────────────────────────
 .next/
 out/
-
-# Production build
 dist/
 
-# Dependencies
+# ─── Dependencies ─────────────────────────────────────────────────────────────
 node_modules/
 
-# Environment files — never commit secrets
+# ─── Test coverage ────────────────────────────────────────────────────────────
+coverage/
+
+# ─── Environment files — never commit secrets ─────────────────────────────────
 .env
 .env.local
 .env.development.local
 .env.test.local
 .env.production.local
+.env.*
 
-# TypeScript incremental build cache
+# ─── TypeScript build cache ───────────────────────────────────────────────────
 *.tsbuildinfo
 
-# OS metadata
+# ─── OS metadata ──────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
 
-# Editor
+# ─── Editor ───────────────────────────────────────────────────────────────────
 .vscode/
 .idea/
 
-# Debug logs
+# ─── Debug logs ───────────────────────────────────────────────────────────────
+*.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
-# Vercel deployment cache (if added later)
+# ─── CSV exports ─────────────────────────────────────────────────────────────
+# Client-side exports must never be committed — they may contain sensitive URLs.
+*.csv
+
+# ─── Temporary directories ────────────────────────────────────────────────────
+tmp/
+temp/
+
+# ─── PM2 runtime files ────────────────────────────────────────────────────────
+# PM2 process dumps and logs belong to the server, not the repository.
+.pm2/
+ecosystem.config.js.bak
+
+# ─── Vercel / deployment cache ────────────────────────────────────────────────
 .vercel

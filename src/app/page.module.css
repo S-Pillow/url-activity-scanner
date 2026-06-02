@@ -1,95 +1,484 @@
+/*
+ * AIPF-009B: URL Activity Scanner — page styles.
+ *
+ * Replaces the old home-page grid CSS that was left in place after the page
+ * was moved to src/app/page.tsx during integration. The scanner page imports
+ * this file as "./page.module.css"; none of the old class names (.toolGrid,
+ * .siteTitle, etc.) are referenced anywhere now that the home-page component
+ * no longer exists in this app.
+ *
+ * Design language: dark, minimal, cybersecurity-focused, high contrast.
+ * No images, icons, or decorative elements referencing scanned URLs.
+ * All color meanings are reinforced by text, not color alone (accessibility).
+ */
+
+/* ── Layout ────────────────────────────────────────────────────────────────── */
+
 .main {
   min-height: 100vh;
-  padding: 3rem 1.5rem;
-  max-width: 900px;
-  margin: 0 auto;
+  background: var(--bg);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 2.5rem 1rem 5rem;
 }
 
-.header {
-  margin-bottom: 2.5rem;
-  border-bottom: 1px solid var(--border);
-  padding-bottom: 1.5rem;
-}
-
-.siteTitle {
-  font-size: 1.75rem;
-  font-weight: 700;
-  color: var(--text);
-  letter-spacing: -0.01em;
-}
-
-.subtitle {
-  color: var(--text-muted);
-  margin-top: 0.4rem;
-  font-size: 0.95rem;
-}
-
-.toolGrid {
-  list-style: none;
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: 1rem;
-}
-
-.toolCard {
-  display: block;
-  text-decoration: none;
-  color: inherit;
+.card {
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 12px;
+  padding: 2rem 2.25rem 2rem;
+  width: 100%;
+  max-width: 760px;
+  box-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.3),
+    0 8px 32px rgba(0, 0, 0, 0.5);
+}
+
+/* ── Header ───────────────────────────────────────────────────────────────── */
+
+.header {
+  margin-bottom: 1.75rem;
+}
+
+.backLink {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3em;
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  text-decoration: none;
+  margin-bottom: 1.5rem;
+  letter-spacing: 0.01em;
+  border-radius: 4px;
+  padding: 0.1rem 0.2rem;
+  transition: color 0.12s;
+}
+
+.backLink:hover {
+  color: var(--accent);
+}
+
+.backLink:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  color: var(--accent);
+}
+
+.title {
+  font-size: 1.6rem;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+  margin-bottom: 0.6rem;
+}
+
+.tagline {
+  font-size: 0.95rem;
+  color: var(--text-muted);
+  line-height: 1.6;
+  max-width: 580px;
+}
+
+/* ── Safety notice ─────────────────────────────────────────────────────────── */
+
+.notice {
+  background: rgba(88, 166, 255, 0.06);
+  border: 1px solid rgba(88, 166, 255, 0.22);
+  border-left: 3px solid var(--accent-dim);
+  border-radius: 6px;
+  padding: 0.8rem 1rem;
+  margin-bottom: 1.75rem;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  line-height: 1.6;
+}
+
+.notice strong {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* ── Form ──────────────────────────────────────────────────────────────────── */
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+  margin-bottom: 1.75rem;
+}
+
+.label {
+  display: block;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.textarea {
+  width: 100%;
+  background: #0a0e16;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.9rem 1rem;
+  font-family: var(--mono);
+  font-size: 0.875rem;
+  line-height: 1.65;
+  resize: vertical;
+  min-height: 168px;
   transition: border-color 0.15s, box-shadow 0.15s;
 }
 
-.toolCard:hover,
-.toolCard:focus-visible {
+.textarea::placeholder {
+  color: #4a5568;
+  font-style: normal;
+}
+
+.textarea:focus {
+  outline: none;
   border-color: var(--accent-dim);
-  box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.12);
+  box-shadow: 0 0 0 3px rgba(31, 111, 235, 0.25);
 }
 
-.toolCardInner {
-  padding: 1.25rem 1.5rem;
-  position: relative;
+.textarea:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
-.toolBadge {
-  display: inline-block;
-  font-size: 0.7rem;
+/* ── Error message ─────────────────────────────────────────────────────────── */
+
+.error {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  font-size: 0.875rem;
+  color: #fca5a5;
+  background: rgba(248, 81, 73, 0.08);
+  border: 1px solid rgba(248, 81, 73, 0.3);
+  border-left: 3px solid var(--error);
+  border-radius: 6px;
+  padding: 0.65rem 0.9rem;
+  line-height: 1.55;
+}
+
+.error::before {
+  content: "✕";
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: var(--error);
+  margin-top: 0.05em;
+  flex-shrink: 0;
+}
+
+/* ── Button ────────────────────────────────────────────────────────────────── */
+
+.button {
+  align-self: flex-start;
+  background: var(--accent-dim);
+  color: #fff;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 0.65rem 1.6rem;
+  font-size: 0.9rem;
   font-weight: 600;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  color: var(--accent);
-  background: rgba(88, 166, 255, 0.12);
-  border: 1px solid rgba(88, 166, 255, 0.25);
-  border-radius: 4px;
-  padding: 0.1rem 0.5rem;
-  margin-bottom: 0.75rem;
+  cursor: pointer;
+  letter-spacing: 0.02em;
+  line-height: 1;
+  transition: background 0.15s, box-shadow 0.15s;
+  white-space: nowrap;
 }
 
-.toolTitle {
-  font-size: 1.05rem;
-  font-weight: 600;
-  color: var(--text);
+.button:hover:not(:disabled) {
+  background: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.4);
+}
+
+.button:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* ── Results ───────────────────────────────────────────────────────────────── */
+
+.results {
+  border-top: 1px solid var(--border);
+  padding-top: 1.5rem;
+  margin-bottom: 1.75rem;
+}
+
+/* ── Results header row (heading + export button) ────────────────────────── */
+
+.resultsHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
   margin-bottom: 0.5rem;
 }
 
-.toolDescription {
-  font-size: 0.875rem;
+.resultsTitle {
+  font-size: 0.72rem;
+  font-weight: 700;
   color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  /* margin-bottom removed — spacing is now handled by .exportHint */
+}
+
+/* ── CSV export button (secondary/outlined style) ────────────────────────── */
+
+.exportButton {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.35rem 0.9rem;
+  cursor: pointer;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  flex-shrink: 0;
+  line-height: 1;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+
+.exportButton:hover {
+  color: var(--text);
+  border-color: var(--accent-dim);
+  background: rgba(88, 166, 255, 0.06);
+}
+
+.exportButton:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.35);
+}
+
+.exportButton:active {
+  transform: translateY(1px);
+}
+
+/* ── Export helper text ───────────────────────────────────────────────────── */
+
+.exportHint {
+  font-size: 0.76rem;
+  color: var(--text-muted);
+  opacity: 0.65;
+  margin-bottom: 1rem;
+  line-height: 1.4;
+}
+
+.resultList {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.resultItem {
+  background: #0a0e16;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.9rem 1.1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.resultRow {
+  display: flex;
+  gap: 0.75rem;
+  font-size: 0.84rem;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+
+.resultLabel {
+  color: #556070;
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  min-width: 88px;
+  flex-shrink: 0;
+  padding-top: 0.05em;
+}
+
+.resultValue {
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 0.83rem;
+  word-break: break-all;
   line-height: 1.5;
 }
 
-.toolArrow {
-  position: absolute;
-  bottom: 1.25rem;
-  right: 1.5rem;
-  color: var(--text-muted);
-  font-size: 1rem;
-  transition: color 0.15s, transform 0.15s;
+/* ── Result badge ──────────────────────────────────────────────────────────── */
+
+/*
+ * Base badge — used both in the result key legend and in each scan result row.
+ * Color is never the sole indicator: every badge also shows the result text.
+ */
+.resultBadge {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  padding: 0.18rem 0.55rem;
+  border-radius: 4px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  border: 1px solid transparent;
+  vertical-align: middle;
+  line-height: 1.5;
 }
 
-.toolCard:hover .toolArrow,
-.toolCard:focus-visible .toolArrow {
-  color: var(--accent);
-  transform: translateX(3px);
+.resultBadgeOk {
+  background: rgba(63, 185, 80, 0.12);
+  color: #4ade80;
+  border-color: rgba(63, 185, 80, 0.3);
+}
+
+.resultBadgeRedirect {
+  background: rgba(88, 166, 255, 0.1);
+  color: #60b0ff;
+  border-color: rgba(88, 166, 255, 0.25);
+}
+
+.resultBadgeWarning {
+  background: rgba(210, 153, 34, 0.1);
+  color: #e6aa35;
+  border-color: rgba(210, 153, 34, 0.3);
+}
+
+.resultBadgeError {
+  background: rgba(248, 81, 73, 0.1);
+  color: #ff7070;
+  border-color: rgba(248, 81, 73, 0.3);
+}
+
+.resultBadgeNeutral {
+  background: rgba(139, 148, 158, 0.08);
+  color: #8b949e;
+  border-color: rgba(139, 148, 158, 0.2);
+}
+
+/* ── Result key ────────────────────────────────────────────────────────────── */
+
+.resultKey {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(10, 14, 22, 0.55);
+  padding: 0.85rem 1.1rem 1rem;
+  margin-bottom: 1.75rem;
+}
+
+.resultKeyHeading {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  margin-bottom: 0.8rem;
+}
+
+.resultKeyList {
+  list-style: none;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.5rem 1.5rem;
+}
+
+.resultKeyEntry {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.55rem;
+}
+
+.resultKeyMeaning {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  line-height: 1.4;
+  padding-top: 0.15rem;
+}
+
+/* ── Footer notes ─────────────────────────────────────────────────────────── */
+
+.footer {
+  border-top: 1px solid var(--border);
+  padding-top: 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.privacyNote {
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  line-height: 1.65;
+  background: rgba(63, 185, 80, 0.05);
+  border: 1px solid rgba(63, 185, 80, 0.15);
+  border-left: 3px solid rgba(63, 185, 80, 0.4);
+  border-radius: 6px;
+  padding: 0.65rem 0.9rem;
+}
+
+.privacyNote strong {
+  color: var(--success);
+  font-weight: 600;
+}
+
+.warningNote {
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  line-height: 1.65;
+  background: rgba(210, 153, 34, 0.05);
+  border: 1px solid rgba(210, 153, 34, 0.2);
+  border-left: 3px solid rgba(210, 153, 34, 0.5);
+  border-radius: 6px;
+  padding: 0.65rem 0.9rem;
+}
+
+.warningNote strong {
+  color: var(--warning);
+  font-weight: 600;
+}
+
+/* ── Responsive ───────────────────────────────────────────────────────────── */
+
+@media (max-width: 520px) {
+  .card {
+    padding: 1.5rem 1.1rem 1.5rem;
+    border-radius: 0;
+    border-left: none;
+    border-right: none;
+  }
+
+  .button {
+    width: 100%;
+    text-align: center;
+    align-self: stretch;
+  }
+
+  .resultLabel {
+    min-width: 70px;
+  }
+
+  .resultKeyList {
+    grid-template-columns: 1fr;
+  }
 }
