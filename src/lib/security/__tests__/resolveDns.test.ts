@@ -28,6 +28,7 @@
 import { resolveDns, type DnsCheckResult } from "../resolveDns";
 import { validateUrl, type UrlValidationResult } from "../validateUrl";
 import { promises as dnsPromises } from "dns";
+import { ScanAbortError } from "../cancellation";
 
 // ─── Mock dns module ──────────────────────────────────────────────────────────
 //
@@ -48,6 +49,48 @@ const mockResolve4 = dnsPromises.resolve4 as jest.MockedFunction<
 const mockResolve6 = dnsPromises.resolve6 as jest.MockedFunction<
   typeof dnsPromises.resolve6
 >;
+
+describe("cancellation", () => {
+  it("ignores late DNS completion and settles promptly on abort", async () => {
+    let resolve4Late!: (addresses: string[]) => void;
+    let resolve6Late!: (addresses: string[]) => void;
+    mockResolve4.mockReturnValue(
+      new Promise<string[]>((resolve) => {
+        resolve4Late = resolve;
+      })
+    );
+    mockResolve6.mockReturnValue(
+      new Promise<string[]>((resolve) => {
+        resolve6Late = resolve;
+      })
+    );
+
+    const controller = new AbortController();
+    const operation = resolveDns(makeValidInput(), {
+      signal: controller.signal,
+    });
+
+    controller.abort();
+    await expect(operation).rejects.toBeInstanceOf(ScanAbortError);
+
+    // Underlying Node DNS cannot be cancelled, but late completion remains
+    // observed by raceWithSignal and cannot produce a DNS_OK result.
+    resolve4Late(["93.184.216.34"]);
+    resolve6Late([]);
+    await Promise.resolve();
+  });
+
+  it("does not start DNS when already aborted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      resolveDns(makeValidInput(), { signal: controller.signal })
+    ).rejects.toBeInstanceOf(ScanAbortError);
+    expect(mockResolve4).not.toHaveBeenCalled();
+    expect(mockResolve6).not.toHaveBeenCalled();
+  });
+});
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 

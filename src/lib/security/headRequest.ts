@@ -13,6 +13,11 @@
  *   - Redirects are handled manually (automatic following is disabled).
  *   - Every redirect destination is re-validated with AIPF-002 and AIPF-003
  *     before the next request is sent. A blocked destination terminates the chain.
+ *   - Outbound sockets are pinned to the hop's resolveDns()-approved IP set via
+ *     pinnedLookup (custom Node lookup). Node must not re-resolve the hostname
+ *     at connect time — closes DNS-rebinding / SSRF TOCTOU between validation
+ *     and socket creation. Host / TLS SNI / certificate verification still use
+ *     the original hostname.
  *   - Maximum 3 redirects. Further redirects return TOO_MANY_REDIRECTS.
  *   - Per-request timeout defaults to 10 seconds (AIPF-001 recommendation).
  *   - Submitted URLs, redirect destinations, hostnames, and resolved IPs are
@@ -44,6 +49,17 @@ import * as https from "https";
 import { validateUrl } from "./validateUrl";
 import { resolveDns } from "./resolveDns";
 import type { DnsCheckResult } from "./resolveDns";
+import {
+  buildPinnedRequestOptions,
+  PinLookupError,
+  PIN_LOOKUP_ERROR_CODE,
+} from "./pinnedLookup";
+import {
+  isScanAbortError,
+  ScanAbortError,
+  SCAN_ABORT_ERROR_CODE,
+  throwIfAborted,
+} from "./cancellation";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -65,6 +81,7 @@ export type HeadResult =
   | "NETWORK_ERROR"     // Any other network-level error
   | "INVALID"           // Prior validation result was INVALID or redirect was malformed
   | "DNS_FAILURE"       // DNS resolution failed for the URL or a redirect destination
+  | "ABORTED"           // Request-scoped cancellation; not a remote-host failure
   | "TOO_MANY_REDIRECTS"; // Redirect chain exceeded MAX_REDIRECTS
 
 export interface HeadRequestResult {
@@ -90,6 +107,12 @@ export interface HeadRequestResult {
   reason: string;
   /** Machine-readable result code. */
   result: HeadResult;
+  /**
+   * Approved IP set for `finalUrl` (the hop that produced the final outcome).
+   * Empty when no outbound connection was attempted. Consumed by AIPF-005 to
+   * pin the initial GET fallback socket without re-opening unrestricted DNS.
+   */
+  finalResolvedIps: string[];
 }
 
 // ─── Internal types ──────────────────────────────────────────────────────────
@@ -103,18 +126,25 @@ type SingleHopResult =
   | { ok: true; statusCode: number; locationHeader: string | null }
   | {
       ok: false;
-      result: Extract<HeadResult, "TIMEOUT" | "CONNECTION_REFUSED" | "NETWORK_ERROR">;
+      result: Extract<HeadResult, "TIMEOUT" | "CONNECTION_REFUSED" | "NETWORK_ERROR" | "ABORTED">;
       reason: string;
     };
 
 /**
- * Function signature for a single HEAD request hop.
- * The default implementation uses Node.js http/https.
+ * Function signature for a single HEAD/GET request hop.
+ * The default implementation uses Node.js http/https with pinned lookup.
  * Tests inject a mock via the _fetcher option in sendHeadRequest().
+ *
+ * `approvedIps` is mandatory: production fetchers fail closed when the set is
+ * empty or unsafe. Mocks should still accept and may assert on it.
  */
 export type SingleHopFetcher = (
   url: string,
-  opts: { timeoutMs: number }
+  opts: {
+    timeoutMs: number;
+    approvedIps: readonly string[];
+    signal?: AbortSignal;
+  }
 ) => Promise<SingleHopResult>;
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
@@ -123,9 +153,15 @@ export type SingleHopFetcher = (
 const ALLOWED_RESULTS = new Set<HeadResult>(["HEAD_OK", "REDIRECTED"]);
 
 function makeHeadResult(
-  partial: Omit<HeadRequestResult, "allowed">
+  partial: Omit<HeadRequestResult, "allowed" | "finalResolvedIps"> & {
+    finalResolvedIps?: string[];
+  }
 ): HeadRequestResult {
-  return { ...partial, allowed: ALLOWED_RESULTS.has(partial.result) };
+  return {
+    ...partial,
+    finalResolvedIps: partial.finalResolvedIps ?? [],
+    allowed: ALLOWED_RESULTS.has(partial.result),
+  };
 }
 
 /**
@@ -150,6 +186,9 @@ function mapDnsResultToHeadResult(
  *
  * Safety:
  *   - Only HEAD is sent (method is hardcoded).
+ *   - TCP peer is pinned to `approvedIps` via buildPinnedRequestOptions —
+ *     Node does not perform an independent hostname DNS lookup at connect.
+ *   - Original hostname is preserved for Host / SNI / certificate checks.
  *   - The response body is immediately destroyed — nothing is read.
  *   - A per-request wall-clock timeout is enforced via setTimeout.
  *   - No redirect following occurs here; the caller handles Location manually.
@@ -157,16 +196,38 @@ function mapDnsResultToHeadResult(
  */
 const realFetcher: SingleHopFetcher = (
   url: string,
-  { timeoutMs }: { timeoutMs: number }
+  {
+    timeoutMs,
+    approvedIps,
+    signal,
+  }: {
+    timeoutMs: number;
+    approvedIps: readonly string[];
+    signal?: AbortSignal;
+  }
 ): Promise<SingleHopResult> => {
   return new Promise((resolve) => {
     let settled = false;
+    let req: http.ClientRequest | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
 
     function settle(result: SingleHopResult): void {
       if (!settled) {
         settled = true;
+        if (timer) clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
         resolve(result);
       }
+    }
+
+    function onAbort(): void {
+      req?.destroy(new ScanAbortError());
+      settle({ ok: false, result: "ABORTED", reason: "Request cancelled" });
+    }
+
+    if (signal?.aborted) {
+      settle({ ok: false, result: "ABORTED", reason: "Request cancelled" });
+      return;
     }
 
     let parsed: URL;
@@ -177,46 +238,68 @@ const realFetcher: SingleHopFetcher = (
       return;
     }
 
+    let requestOptions: http.RequestOptions;
+    try {
+      requestOptions = buildPinnedRequestOptions({
+        url: parsed,
+        method: "HEAD",
+        approvedIps,
+        headers: { "User-Agent": USER_AGENT },
+      });
+    } catch (e) {
+      const reason =
+        e instanceof PinLookupError
+          ? e.message
+          : "Failed to pin outbound connection to approved addresses";
+      settle({ ok: false, result: "NETWORK_ERROR", reason });
+      return;
+    }
+
     const mod = parsed.protocol === "https:" ? https : http;
 
-    const timer = setTimeout(() => {
-      req.destroy();
+    timer = setTimeout(() => {
+      req?.destroy();
       settle({ ok: false, result: "TIMEOUT", reason: "Request timed out" });
     }, timeoutMs);
 
-    const req = mod.request(
-      {
-        method: "HEAD",
-        hostname: parsed.hostname,
-        // parsed.port is a string; undefined means "use protocol default"
-        port: parsed.port || undefined,
-        path: `${parsed.pathname}${parsed.search}`,
-        headers: { "User-Agent": USER_AGENT },
-      },
-      (res) => {
-        clearTimeout(timer);
+    req = mod.request(requestOptions, (res) => {
+      const statusCode = res.statusCode ?? 0;
+      const rawLocation = res.headers["location"];
+      const locationHeader: string | null = Array.isArray(rawLocation)
+        ? (rawLocation[0] ?? null)
+        : (rawLocation ?? null);
 
-        const statusCode = res.statusCode ?? 0;
-        const rawLocation = res.headers["location"];
-        const locationHeader: string | null = Array.isArray(rawLocation)
-          ? (rawLocation[0] ?? null)
-          : (rawLocation ?? null);
+      // Immediately destroy the response — never buffer any body.
+      // HEAD responses should have no body, but some buggy servers send one.
+      res.destroy();
 
-        // Immediately destroy the response — never buffer any body.
-        // HEAD responses should have no body, but some buggy servers send one.
-        res.destroy();
+      settle({ ok: true, statusCode, locationHeader });
+    });
 
-        settle({ ok: true, statusCode, locationHeader });
-      }
-    );
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
 
     req.on("error", (err: NodeJS.ErrnoException) => {
-      clearTimeout(timer);
       if (settled) return; // timeout already resolved the promise
 
       const code = err.code ?? "";
-      if (code === "ECONNREFUSED") {
+      if (
+        code === SCAN_ABORT_ERROR_CODE ||
+        isScanAbortError(err) ||
+        signal?.aborted
+      ) {
+        settle({ ok: false, result: "ABORTED", reason: "Request cancelled" });
+      } else if (code === "ECONNREFUSED") {
         settle({ ok: false, result: "CONNECTION_REFUSED", reason: "Connection refused" });
+      } else if (code === PIN_LOOKUP_ERROR_CODE) {
+        settle({
+          ok: false,
+          result: "NETWORK_ERROR",
+          reason: err.message || "Pinned lookup failed",
+        });
       } else {
         settle({ ok: false, result: "NETWORK_ERROR", reason: `Network error: ${err.message}` });
       }
@@ -247,16 +330,34 @@ export async function sendHeadRequest(
   dnsResult: DnsCheckResult,
   options?: {
     timeoutMs?: number;
+    signal?: AbortSignal;
     /** @internal — test seam only, not part of the stable public API. */
     _fetcher?: SingleHopFetcher;
   }
 ): Promise<HeadRequestResult> {
   const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const fetcher = options?._fetcher ?? realFetcher;
+  const signal = options?.signal;
   const startTime = Date.now();
   const elapsed = (): number => Date.now() - startTime;
 
   const { originalInput, normalizedUrl } = dnsResult;
+
+  if (signal?.aborted) {
+    return makeHeadResult({
+      originalInput,
+      normalizedUrl,
+      finalUrl: null,
+      statusCode: null,
+      redirected: false,
+      redirectChain: [],
+      redirectCount: 0,
+      durationMs: elapsed(),
+      reason: "Request cancelled",
+      result: "ABORTED",
+      finalResolvedIps: [],
+    });
+  }
 
   // ── Step 1: Gate — do not proceed unless AIPF-003 returned DNS_OK ─────────
   //
@@ -274,6 +375,7 @@ export async function sendHeadRequest(
       durationMs: elapsed(),
       reason: dnsResult.reason,
       result: mapDnsResultToHeadResult(dnsResult.result),
+      finalResolvedIps: [],
     });
   }
 
@@ -291,12 +393,33 @@ export async function sendHeadRequest(
       durationMs: elapsed(),
       reason: "Normalised URL missing from DNS result",
       result: "INVALID",
+      finalResolvedIps: [],
+    });
+  }
+
+  // Fail closed: DNS_OK without approved IPs must never open a socket that
+  // would fall back to unrestricted hostname resolution.
+  if (!dnsResult.resolvedIps || dnsResult.resolvedIps.length === 0) {
+    return makeHeadResult({
+      originalInput,
+      normalizedUrl,
+      finalUrl: null,
+      statusCode: null,
+      redirected: false,
+      redirectChain: [],
+      redirectCount: 0,
+      durationMs: elapsed(),
+      reason: "No approved addresses available for outbound connection",
+      result: "NETWORK_ERROR",
+      finalResolvedIps: [],
     });
   }
 
   // ── Step 2: HEAD request loop with manual redirect handling ───────────────
 
   let currentUrl = normalizedUrl;
+  /** Approved IPs for the current hop only — never reused across hostnames. */
+  let approvedIps: readonly string[] = dnsResult.resolvedIps;
   const redirectChain: string[] = [];
   let redirectCount = 0;
 
@@ -306,8 +429,28 @@ export async function sendHeadRequest(
   //   c) The redirect cap (redirectCount >= MAX_REDIRECTS) exits when exceeded.
   // eslint-disable-next-line no-constant-condition
   while (true) {
-    // ── 2a: Send a single HEAD request ──────────────────────────────────────
-    const hopResult = await fetcher(currentUrl, { timeoutMs });
+    if (signal?.aborted) {
+      return makeHeadResult({
+        originalInput,
+        normalizedUrl,
+        finalUrl: currentUrl,
+        statusCode: null,
+        redirected: redirectCount > 0,
+        redirectChain,
+        redirectCount,
+        durationMs: elapsed(),
+        reason: "Request cancelled",
+        result: "ABORTED",
+        finalResolvedIps: [...approvedIps],
+      });
+    }
+
+    // ── 2a: Send a single HEAD request (pinned to this hop's approved IPs) ──
+    const hopResult = await fetcher(currentUrl, {
+      timeoutMs,
+      approvedIps,
+      signal,
+    });
 
     if (!hopResult.ok) {
       return makeHeadResult({
@@ -321,10 +464,27 @@ export async function sendHeadRequest(
         durationMs: elapsed(),
         reason: hopResult.reason,
         result: hopResult.result,
+        finalResolvedIps: [...approvedIps],
       });
     }
 
     const { statusCode, locationHeader } = hopResult;
+
+    if (signal?.aborted) {
+      return makeHeadResult({
+        originalInput,
+        normalizedUrl,
+        finalUrl: currentUrl,
+        statusCode: null,
+        redirected: redirectCount > 0,
+        redirectChain,
+        redirectCount,
+        durationMs: elapsed(),
+        reason: "Request cancelled",
+        result: "ABORTED",
+        finalResolvedIps: [...approvedIps],
+      });
+    }
 
     // ── 2b: Non-redirect response — return final result ──────────────────────
     if (!REDIRECT_CODES.has(statusCode)) {
@@ -342,6 +502,7 @@ export async function sendHeadRequest(
             ? "HEAD request completed after redirect(s)"
             : "HEAD request completed",
         result: redirectCount > 0 ? "REDIRECTED" : "HEAD_OK",
+        finalResolvedIps: [...approvedIps],
       });
     }
 
@@ -358,6 +519,7 @@ export async function sendHeadRequest(
         durationMs: elapsed(),
         reason: `Redirect chain exceeded the maximum of ${MAX_REDIRECTS} hops`,
         result: "TOO_MANY_REDIRECTS",
+        finalResolvedIps: [...approvedIps],
       });
     }
 
@@ -374,6 +536,7 @@ export async function sendHeadRequest(
         durationMs: elapsed(),
         reason: "Redirect response is missing a Location header",
         result: "NETWORK_ERROR",
+        finalResolvedIps: [...approvedIps],
       });
     }
 
@@ -393,6 +556,7 @@ export async function sendHeadRequest(
         durationMs: elapsed(),
         reason: "Redirect destination URL is malformed",
         result: "INVALID",
+        finalResolvedIps: [...approvedIps],
       });
     }
 
@@ -401,6 +565,24 @@ export async function sendHeadRequest(
     // The redirect URL is treated as new, untrusted input. validateUrl() checks
     // scheme, hostname, and IP ranges. Any BLOCKED or INVALID result terminates
     // the chain immediately — no DNS lookup or HTTP request is made.
+    try {
+      throwIfAborted(signal);
+    } catch {
+      return makeHeadResult({
+        originalInput,
+        normalizedUrl,
+        finalUrl: currentUrl,
+        statusCode: null,
+        redirected: redirectCount > 0,
+        redirectChain,
+        redirectCount,
+        durationMs: elapsed(),
+        reason: "Request cancelled",
+        result: "ABORTED",
+        finalResolvedIps: [...approvedIps],
+      });
+    }
+
     const nextValidation = validateUrl(nextUrl);
     if (nextValidation.result !== "VALID") {
       return makeHeadResult({
@@ -414,6 +596,7 @@ export async function sendHeadRequest(
         durationMs: elapsed(),
         reason: `Redirect destination blocked by URL validation: ${nextValidation.reason}`,
         result: nextValidation.result === "INVALID" ? "INVALID" : "BLOCKED",
+        finalResolvedIps: [...approvedIps],
       });
     }
 
@@ -421,7 +604,28 @@ export async function sendHeadRequest(
     //
     // Re-resolving DNS ensures that a redirect to a domain that resolves to a
     // private IP is caught even if the domain passes the URL validation step.
-    const nextDns = await resolveDns(nextValidation);
+    // The new approved IP set replaces the previous hop's set — never reuse.
+    let nextDns: DnsCheckResult;
+    try {
+      nextDns = await resolveDns(nextValidation, { signal });
+    } catch (error) {
+      if (isScanAbortError(error) || signal?.aborted) {
+        return makeHeadResult({
+          originalInput,
+          normalizedUrl,
+          finalUrl: currentUrl,
+          statusCode: null,
+          redirected: redirectCount > 0,
+          redirectChain,
+          redirectCount,
+          durationMs: elapsed(),
+          reason: "Request cancelled",
+          result: "ABORTED",
+          finalResolvedIps: [...approvedIps],
+        });
+      }
+      throw error;
+    }
     if (nextDns.result !== "DNS_OK") {
       return makeHeadResult({
         originalInput,
@@ -434,12 +638,30 @@ export async function sendHeadRequest(
         durationMs: elapsed(),
         reason: `Redirect destination DNS check failed: ${nextDns.reason}`,
         result: nextDns.result === "DNS_FAILURE" ? "DNS_FAILURE" : "BLOCKED",
+        finalResolvedIps: [...approvedIps],
       });
     }
 
-    // ── 2g: Safe to follow — record and continue ─────────────────────────────
+    if (!nextDns.resolvedIps || nextDns.resolvedIps.length === 0) {
+      return makeHeadResult({
+        originalInput,
+        normalizedUrl,
+        finalUrl: currentUrl,
+        statusCode,
+        redirected: redirectCount > 0,
+        redirectChain,
+        redirectCount,
+        durationMs: elapsed(),
+        reason: "Redirect destination has no approved addresses for outbound connection",
+        result: "NETWORK_ERROR",
+        finalResolvedIps: [...approvedIps],
+      });
+    }
+
+    // ── 2g: Safe to follow — record and continue with this hop's pin set ─────
     redirectChain.push(nextUrl);
     currentUrl = nextUrl;
+    approvedIps = nextDns.resolvedIps;
     redirectCount++;
   }
 }

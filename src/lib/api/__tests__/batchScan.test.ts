@@ -117,6 +117,7 @@ function makeHeadOk(
     durationMs: 100,
     reason: "HEAD request completed",
     result: "HEAD_OK",
+    finalResolvedIps: ["93.184.216.34"],
   };
 }
 
@@ -133,6 +134,7 @@ function makeHeadTimeout(input = "https://example.com"): HeadRequestResult {
     durationMs: 10000,
     reason: "Request timed out",
     result: "TIMEOUT",
+    finalResolvedIps: [],
   };
 }
 
@@ -677,6 +679,171 @@ describe("8. Batch timeout", () => {
     expect(res.status).toBe(408);
     expect((res.body as BatchScanErrorBody).error.code).toBe("BATCH_TIMEOUT");
     expect((res.body as BatchScanErrorBody).error.retryAfterSeconds).toBeNull();
+  });
+});
+
+// ─── 9. Batch cancellation boundary ──────────────────────────────────────────
+
+describe("9. Batch cancellation boundary", () => {
+  it("does not start queued URLs after the deadline", async () => {
+    jest.useFakeTimers();
+
+    const started: string[] = [];
+    const settled: string[] = [];
+    const scan = jest.fn(
+      (url: string, signal: AbortSignal): Promise<ScanResult> => {
+        started.push(url);
+        return new Promise((_, reject) => {
+          const onAbort = () => {
+            settled.push(url);
+            reject(new Error("cancelled"));
+          };
+          signal.addEventListener("abort", onAbort, { once: true });
+        });
+      }
+    );
+
+    const limiter = makeAllowingLimiter({
+      maxConcurrentUrlsPerBatch: 2,
+    });
+    const responsePromise = handleBatchScan(
+      makeRequest(["u1", "u2", "u3", "u4", "u5"]),
+      {
+        _rateLimiter: limiter,
+        _timeoutMs: 100,
+        _scanUrl: scan,
+      }
+    );
+
+    await Promise.resolve();
+    expect(started).toEqual(["u1", "u2"]);
+
+    await jest.advanceTimersByTimeAsync(100);
+    const response = await responsePromise;
+
+    expect(response.status).toBe(408);
+    expect((response.body as BatchScanErrorBody).error.code).toBe(
+      "BATCH_TIMEOUT"
+    );
+    expect(started).toEqual(["u1", "u2"]);
+    expect(settled.sort()).toEqual(["u1", "u2"]);
+    expect(scan).toHaveBeenCalledTimes(2);
+  });
+
+  it("late DNS completion after timeout never starts HEAD or GET", async () => {
+    jest.useFakeTimers();
+
+    let resolveLateDns!: (value: DnsCheckResult) => void;
+    mockResolveDns.mockReturnValue(
+      new Promise<DnsCheckResult>((resolve) => {
+        resolveLateDns = resolve;
+      })
+    );
+
+    const responsePromise = handleBatchScan(
+      makeRequest(["https://late-dns.example"]),
+      {
+        _rateLimiter: makeAllowingLimiter(),
+        _timeoutMs: 100,
+      }
+    );
+
+    await Promise.resolve();
+    expect(mockResolveDns).toHaveBeenCalledTimes(1);
+
+    await jest.advanceTimersByTimeAsync(100);
+    const response = await responsePromise;
+    expect(response.status).toBe(408);
+
+    resolveLateDns(makeDnsOk("https://late-dns.example"));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(mockHeadRequest).not.toHaveBeenCalled();
+    expect(mockGetFallback).not.toHaveBeenCalled();
+  });
+
+  it("does not launch GET when HEAD completes with 405 after abort", async () => {
+    jest.useFakeTimers();
+
+    let resolveLateHead!: (value: HeadRequestResult) => void;
+    mockHeadRequest.mockReturnValue(
+      new Promise<HeadRequestResult>((resolve) => {
+        resolveLateHead = resolve;
+      })
+    );
+
+    const responsePromise = handleBatchScan(
+      makeRequest(["https://head-get-race.example"]),
+      {
+        _rateLimiter: makeAllowingLimiter(),
+        _timeoutMs: 100,
+      }
+    );
+
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(mockHeadRequest).toHaveBeenCalledTimes(1);
+
+    await jest.advanceTimersByTimeAsync(100);
+    const response = await responsePromise;
+    expect(response.status).toBe(408);
+
+    resolveLateHead(makeHeadOk("https://head-get-race.example", 405));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(mockGetFallback).not.toHaveBeenCalled();
+  });
+
+  it("normal completion before deadline remains unchanged", async () => {
+    jest.useFakeTimers();
+
+    const responsePromise = handleBatchScan(
+      makeRequest(["https://example.com"]),
+      {
+        _rateLimiter: makeAllowingLimiter(),
+        _timeoutMs: 120_000,
+      }
+    );
+
+    const response = await responsePromise;
+    expect(response.status).toBe(200);
+    expect((response.body as BatchScanSuccessBody).results).toHaveLength(1);
+    expect(mockResolveDns).toHaveBeenCalledTimes(1);
+    expect(mockHeadRequest).toHaveBeenCalledTimes(1);
+    expect(mockGetFallback).not.toHaveBeenCalled();
+    expect(jest.getTimerCount()).toBe(0);
+  });
+
+  it("propagates one shared AbortSignal through DNS, HEAD, and GET", async () => {
+    let dnsSignal: AbortSignal | undefined;
+    let headSignal: AbortSignal | undefined;
+    let getSignal: AbortSignal | undefined;
+
+    mockResolveDns.mockImplementation(async (_validation, options) => {
+      dnsSignal = options?.signal;
+      return makeDnsOk();
+    });
+    mockHeadRequest.mockImplementation(async (_dns, options) => {
+      headSignal = options?.signal;
+      return makeHeadOk("https://example.com", 405);
+    });
+    mockGetFallback.mockImplementation(async (_head, options) => {
+      getSignal = options?.signal;
+      return makeGetFallbackOk();
+    });
+
+    const response = await handleBatchScan(
+      makeRequest(["https://example.com"]),
+      { _rateLimiter: makeAllowingLimiter() }
+    );
+
+    expect(response.status).toBe(200);
+    expect(dnsSignal).toBeInstanceOf(AbortSignal);
+    expect(headSignal).toBe(dnsSignal);
+    expect(getSignal).toBe(dnsSignal);
+    expect(dnsSignal?.aborted).toBe(false);
   });
 });
 

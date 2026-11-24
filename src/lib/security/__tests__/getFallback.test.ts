@@ -43,6 +43,7 @@ function makeHeadOk(
     durationMs: 50,
     reason: "HEAD request completed",
     result: "HEAD_OK",
+    finalResolvedIps: ["93.184.216.34"],
   };
 }
 
@@ -66,6 +67,7 @@ function makeHeadRedirected(
     durationMs: 100,
     reason: "HEAD request completed after redirect(s)",
     result: "REDIRECTED",
+    finalResolvedIps: ["93.184.216.34"],
   };
 }
 
@@ -86,6 +88,7 @@ function makeHeadNoResponse(
     durationMs: 10_000,
     reason,
     result,
+    finalResolvedIps: [],
   };
 }
 
@@ -187,7 +190,10 @@ describe("1. NOT_APPLICABLE — GET fallback does not run for non-405/501 HEAD o
   it.each(notApplicableCases)(
     "%s → NOT_APPLICABLE, fetcher not called",
     async (_label, headResult) => {
-      const fetcher = jest.fn<Promise<Awaited<ReturnType<SingleHopFetcher>>>, [string, { timeoutMs: number }]>();
+    const fetcher = jest.fn<
+      Promise<Awaited<ReturnType<SingleHopFetcher>>>,
+      [string, { timeoutMs: number; approvedIps: readonly string[] }]
+    >();
       const result = await runGetFallback(headResult, { _fetcher: fetcher });
 
       expect(result.result).toBe("NOT_APPLICABLE");
@@ -613,7 +619,10 @@ describe("10. Return shape and contract", () => {
   });
 
   it("usedGetFallback is false when NOT_APPLICABLE", async () => {
-    const fetcher = jest.fn<Promise<Awaited<ReturnType<SingleHopFetcher>>>, [string, { timeoutMs: number }]>();
+    const fetcher = jest.fn<
+      Promise<Awaited<ReturnType<SingleHopFetcher>>>,
+      [string, { timeoutMs: number; approvedIps: readonly string[] }]
+    >();
     const result = await runGetFallback(makeHeadOk(200), { _fetcher: fetcher });
 
     expect(result.usedGetFallback).toBe(false);

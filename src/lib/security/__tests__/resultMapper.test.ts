@@ -64,6 +64,10 @@ function makeHead(
     durationMs: 100,
     reason,
     result,
+    finalResolvedIps:
+      result === "HEAD_OK" || result === "REDIRECTED"
+        ? ["93.184.216.34"]
+        : [],
   };
 }
 
