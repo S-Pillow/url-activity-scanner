@@ -331,8 +331,10 @@ describe("6. Result handling", () => {
       name: /Scan results/i,
     });
     expect(resultsSection).toBeInTheDocument();
-    expect(within(resultsSection).getByText("https://example.com")).toBeInTheDocument();
-    expect(within(resultsSection).getByText("200 OK")).toBeInTheDocument();
+    // The classification summary also shows "200 OK", so scope to the result list.
+    const resultList = within(resultsSection).getByRole("list", { name: /Scan results list/i });
+    expect(within(resultList).getByText("https://example.com")).toBeInTheDocument();
+    expect(within(resultList).getByText("200 OK")).toBeInTheDocument();
   });
 
   it("displays a safe error message for API error responses (test 12)", async () => {
@@ -586,7 +588,9 @@ describe("10. AIPF-010 Result table and result key", () => {
   it("displays result as a badge with text (test 23)", async () => {
     await renderFullResult();
     const region = screen.getByRole("region", { name: /Scan results/i });
-    expect(within(region).getByText("301/302 Redirect")).toBeInTheDocument();
+    // The classification summary also shows the label, so scope to the result list.
+    const resultList = within(region).getByRole("list", { name: /Scan results list/i });
+    expect(within(resultList).getByText("301/302 Redirect")).toBeInTheDocument();
   });
 
   it("displays meaning in the result section (test 24)", async () => {
