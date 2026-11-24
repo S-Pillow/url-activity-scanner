@@ -9,18 +9,19 @@ A public prototype security utility that checks whether suspicious URLs appear a
 ## Table of Contents
 
 1. [What This Tool Does](#what-this-tool-does)
-2. [What This Tool Does NOT Do](#what-this-tool-does-not-do)
-3. [Data Handling and Privacy](#data-handling-and-privacy)
-4. [Result Key](#result-key)
-5. [Important Interpretation Notes](#important-interpretation-notes)
-6. [Security Controls](#security-controls)
-7. [Current Prototype Limits](#current-prototype-limits)
-8. [Local Development](#local-development)
-9. [Production Runtime](#production-runtime)
-10. [Testing](#testing)
-11. [Deployment Notes](#deployment-notes)
-12. [Repository Safety](#repository-safety)
-13. [License / Ownership](#license--ownership)
+2. [Using the Results Page](#using-the-results-page)
+3. [What This Tool Does NOT Do](#what-this-tool-does-not-do)
+4. [Data Handling and Privacy](#data-handling-and-privacy)
+5. [Result Key](#result-key)
+6. [Important Interpretation Notes](#important-interpretation-notes)
+7. [Security Controls](#security-controls)
+8. [Current Prototype Limits](#current-prototype-limits)
+9. [Local Development](#local-development)
+10. [Production Runtime](#production-runtime)
+11. [Testing](#testing)
+12. [Deployment Notes](#deployment-notes)
+13. [Repository Safety](#repository-safety)
+14. [License / Ownership](#license--ownership)
 
 ---
 
@@ -30,13 +31,30 @@ The URL Activity Scanner performs a lightweight, server-side network check for e
 
 1. **Input normalization** — Plain domains (e.g. `example.com`) are prefixed with `https://` before processing.
 2. **SSRF validation** — The URL is checked for scheme (only `http://` and `https://` are allowed), hostname safety (localhost and `.local`/`.internal` suffixes are blocked), and IP address safety. Private, loopback, link-local, cloud metadata, multicast, and reserved IPv4 and IPv6 ranges are blocked before any network request is made.
-3. **DNS resolution** — The hostname is resolved using the server's system resolver. Every returned IP address (A and AAAA records) is independently checked against the SSRF blocklist. If any single resolved IP is unsafe, the URL is blocked.
-4. **HEAD request** — A single HTTP `HEAD` request is sent. The response body is destroyed immediately and is never read or stored. Only the status code and redirect `Location` header are used.
-5. **GET fallback** — If and only if the server responds with `405 Method Not Allowed` or `501 Not Implemented`, a controlled `GET` request is sent to the same URL. The response body is destroyed immediately — nothing is read. This is the only case where GET is used.
-6. **Redirect handling** — Redirects are followed manually, up to a maximum of 3 hops. Each redirect destination is independently re-validated (SSRF check + DNS check) before the next request is sent.
+3. **DNS resolution** — The hostname is resolved using the server's system resolver. Every returned IP address (A and AAAA records) is independently checked against the SSRF blocklist. If any single resolved IP is unsafe, the URL is blocked. The addresses that pass become the only addresses the scanner may connect to for that hostname.
+4. **HEAD request** — A single HTTP `HEAD` request is sent. The connection is pinned to the addresses approved in step 3 (see [DNS Pinning](#dns-pinning)). The response body is destroyed immediately and is never read or stored. Only the status code and redirect `Location` header are used.
+5. **GET fallback** — If and only if the server responds with `405 Method Not Allowed` or `501 Not Implemented`, a controlled `GET` request is sent to the same URL, pinned to the same approved addresses. The response body is destroyed immediately — nothing is read. This is the only case where GET is used.
+6. **Redirect handling** — Redirects are followed manually, up to a maximum of 3 hops. Each redirect destination is independently re-validated (SSRF check + DNS check) before the next request is sent, and that hop's connection is pinned to its own newly approved addresses.
 7. **Result mapping** — The raw network outcome is mapped to one of the eleven user-facing result strings (see [Result Key](#result-key)) plus a human-readable meaning, notes, and a timestamp.
-8. **Browser display** — Results are displayed temporarily in the browser. No result is saved to a database or server log.
+8. **Browser display** — Results are displayed temporarily in the browser (see [Using the Results Page](#using-the-results-page)). No result is saved to a database or server log.
 9. **CSV export** — The user can export the currently visible results as a CSV file, generated entirely in the browser. The server never generates or stores the CSV.
+
+Each batch has a server-side deadline (120 seconds). If the deadline is reached, the server stops the batch's remaining work and returns a timeout error (see [Batch Deadline Cancellation](#batch-deadline-cancellation)).
+
+---
+
+## Using the Results Page
+
+The page is designed primarily for desktop use and remains usable on narrow and mobile screens.
+
+- **Submitting a scan.** While a scan runs, the URL box and the Scan button are disabled, which also prevents duplicate submissions. Keyboard focus moves to a progress message stating how many URLs are being scanned, so it is not lost. There is no Cancel button: a running scan cannot be stopped from the page and ends when the server responds.
+- **When results arrive,** focus moves to the "Results — N URLs" heading and the results scroll into view. If you moved focus elsewhere during the scan, focus and scroll position are left alone and a status message announces that results are available.
+- **When a scan fails** (validation, rate limit, batch timeout, or a network error), the error message is shown and announced, and focus returns to the Scan button.
+- **Classification counts.** A summary above the results shows how many URLs received each of the eleven results, including results with a count of zero.
+- **Result rows.** On wider screens, each URL is one dense row: number, result and its check time ("Checked at", UTC), the submitted URL plus any normalized URL or redirect destination, and the result's meaning and notes. On narrow screens the same information is shown as stacked cards. Every result keeps its own timestamp. URLs are displayed as plain text and are never clickable.
+- **Result key.** The complete, fully expanded result key is always shown. It sits below the form before a scan and after the results once results exist, and "Result key ↓" and "↑ Back to results" links move between the two.
+- **CSV export.** The "Export CSV" button sits in the results toolbar next to the results heading and is reachable by keyboard. The toolbar stays visible while you scroll through the results. A note under the toolbar explains that the file is generated in your browser.
+- **Visual accessibility.** Text and controls use accessible contrast, focus indicators are always visible for keyboard users, results are never conveyed by color alone, and smooth scrolling is disabled when the operating system requests reduced motion.
 
 ---
 
@@ -130,12 +148,32 @@ The following controls are enforced server-side, before any network request reac
 - The system resolver (`dns.promises`) is used. No third-party DNS service is queried.
 - DNS results are not cached by the application.
 
+### DNS Pinning
+
+Validation and connection use the same addresses, which closes the DNS-rebinding window between checking an address and connecting to it.
+
+- Every outbound HEAD and GET connection uses a pinned lookup that returns only the addresses approved by the DNS safety check. Node.js does not resolve the hostname again at connect time, so a different (for example, private) answer served later cannot be used.
+- The original hostname is still used for the `Host` header, TLS SNI and certificate verification. Only the network peer is pinned.
+- Pinning fails closed. If the approved set is empty or malformed, or no approved address matches the requested address family, no connection is made. Each approved address is checked against the SSRF blocklist again before use.
+- Approved addresses are never reused across hostnames. The initial GET fallback reuses the HEAD request's final approved set, and every redirect hop uses its own newly resolved and approved set.
+
 ### Redirect Safety
 
 - Redirects are followed manually (automatic redirect following is disabled).
-- Every redirect destination is independently re-validated (scheme, hostname, IP) and re-resolved (DNS) before the next request is sent.
+- Every redirect destination is independently re-validated (scheme, hostname, IP) and re-resolved (DNS) before the next request is sent, and the connection for that hop is pinned to its own approved addresses.
 - Maximum redirect chain length: **3 hops**.
 - A redirect to a private or blocked destination immediately terminates the chain.
+
+### Batch Deadline Cancellation
+
+This is **server-side cancellation when the batch deadline is reached**. It is not user-initiated: the page has no Cancel button, and users cannot stop a scan that is running.
+
+- Each batch runs under one server-side deadline (`maxBatchRuntimeMs`, 120 seconds). When the deadline is reached, a single batch-wide cancellation signal is raised.
+- Queued URLs that have not started are not started.
+- In-flight HEAD and GET requests have their sockets destroyed.
+- DNS lookups that are still pending stop being awaited. Node.js cannot cancel an in-flight DNS query, so a late answer is ignored and never leads to IP checks or a connection.
+- The API responds with `408` and error code `BATCH_TIMEOUT`. No partial results from the timed-out batch are returned, and the page shows the timeout message.
+- The 10-second timeout per request hop (see [Current Prototype Limits](#current-prototype-limits)) still applies within the batch deadline.
 
 ### Request Safety
 
@@ -169,8 +207,10 @@ This tool is a **public unauthenticated prototype**. The following known limitat
 | In-memory rate limiter | Rate-limit counters reset when the PM2 process restarts (e.g. on deploy). |
 | Not shared across instances | The rate limiter lives in process memory — multiple server processes or serverless deployments would not share state. A Redis-backed limiter would be required for multi-instance use. |
 | Fixed-window boundary burst | At the 1-hour window boundary, a burst of up to 2× the per-hour limit is briefly possible. A sliding-window or token-bucket design would prevent this. |
-| Per-hop timeout | The 10-second timeout applies per individual request hop, not to the entire redirect chain. A chain with 3 redirects could theoretically run up to 40 seconds. |
-| No AbortController cancellation | If a batch exceeds the 120-second timeout, the handler returns immediately but the underlying per-URL promises continue running in the Node.js event loop until they settle naturally. |
+| Per-hop timeout | The 10-second timeout applies per individual request hop, not to the entire redirect chain. A chain with 3 redirects could theoretically run up to 40 seconds for one URL. The 120-second batch deadline bounds the batch as a whole. |
+| No user-initiated cancellation | Only the server-side batch deadline cancels work. The page has no Cancel button; closing or leaving the page does not stop a batch that is already running on the server. |
+| No partial results on timeout | When the batch deadline is reached, the response is a `BATCH_TIMEOUT` error. Results already completed in that batch are discarded. Smaller batches avoid this. |
+| DNS query cancellation | Node.js cannot cancel an in-flight DNS query. After the deadline the application stops waiting for it and ignores the late answer, but the query itself completes in the background. |
 | Platform-wide CSP | The Content Security Policy is set server-wide by nginx and includes `'unsafe-eval'`, which is broader than strictly necessary for this tool. This is a platform-level concern. |
 | No authentication | Any user can submit URLs. Rate limiting is the only access control. Future internal-only deployment behind authentication is possible. |
 
@@ -188,8 +228,10 @@ This tool is a **public unauthenticated prototype**. The following known limitat
 ```bash
 git clone https://github.com/S-Pillow/url-activity-scanner.git
 cd url-activity-scanner
-npm install
+npm ci
 ```
+
+`npm ci` installs the exact versions recorded in `package-lock.json`.
 
 ### Run in development mode
 
@@ -213,13 +255,15 @@ npm run build
 npm start
 ```
 
-### Run tests
+### Run tests, type check and build
 
 ```bash
-npm test
-# or
-npx jest --ci
+npm test            # or: npx jest --ci
+npx tsc --noEmit
+npm run build
 ```
+
+> **Lint:** `npm run lint` currently fails. The script calls `next lint`, which Next.js 16 no longer provides, so the command exits with an "Invalid project directory" error instead of linting. This is known technical debt; do not treat the lint script as a passing check.
 
 ---
 
@@ -231,7 +275,7 @@ npx jest --ci
 | Node.js version | 20+ |
 | Bind address | `127.0.0.1` (loopback only) |
 | Port | `3002` |
-| Start command | `next start --hostname 127.0.0.1` |
+| Start command | `npm run start -- -p 3002` (the `start` script is `next start --hostname 127.0.0.1`) |
 | Process manager | PM2 |
 | PM2 process name | `url-activity-scanner` |
 | Reverse proxy | nginx |
@@ -266,38 +310,78 @@ The test suite uses **Jest** with `ts-jest` and `@testing-library/react`.
 npx jest --ci
 ```
 
+Tests mock all network and DNS access; the suite never contacts external hosts. Type checking (`npx tsc --noEmit`) and the production build (`npm run build`) are the other required checks. The lint script is not currently usable (see [Local Development](#run-tests-type-check-and-build)).
+
 Tests cover:
 
 | Area | What is tested |
 |---|---|
 | URL validation (`validateUrl.ts`) | Scheme enforcement, private IP ranges, IPv4/IPv6/mapped formats, hostname blocklist |
-| DNS resolution (`resolveDns.ts`) | Gate behavior, every-IP checking, DNS failure, blocked resolved IPs |
-| HEAD request engine (`headRequest.ts`) | Method enforcement, redirect cap, re-validation at each hop, timeout, body non-consumption |
-| GET fallback (`getFallback.ts`) | Trigger only on 405/501, body non-consumption, redirect safety |
+| DNS resolution (`resolveDns.ts`) | Gate behavior, every-IP checking, DNS failure, blocked resolved IPs, cancellation and ignored late answers |
+| DNS pinning (`pinnedLookup.ts`) | Only approved addresses returned, no fallback to unrestricted DNS, fail-closed on empty, malformed or family-mismatched sets |
+| DNS rebinding (`dnsRebindingPinning.test.ts`) | Initial and redirect-hop rebinding for HEAD and GET; private rebind addresses never used; redirect cap retained |
+| Cancellation (`cancellation.ts`) | Abort error identity, abort checks, ignoring late completion after abort |
+| HEAD request engine (`headRequest.ts`) | Method enforcement, redirect cap, re-validation at each hop, timeout, body non-consumption, socket destruction on cancellation |
+| GET fallback (`getFallback.ts`) | Trigger only on 405/501, body non-consumption, redirect safety, pinned connections |
 | Result mapper (`resultMapper.ts`) | All 11 result codes, 503 CDN note, no overclaiming wording |
 | Rate limiter (`rateLimiter.ts`) | Per-IP limit, global limit, batch size limit, window behavior |
-| Batch handler (`batchScan.ts`) | Pipeline ordering, concurrency, timeout, error isolation |
+| Batch handler (`batchScan.ts`) | Pipeline ordering, concurrency, deadline cancellation (no queued starts after the deadline, no HEAD or GET after a late DNS answer), error isolation |
 | API route (`route.ts`) | Method gate, JSON parsing, IP forwarding, error shapes |
 | UI page (`page.test.tsx`) | Form behavior, result display, result key, no clickable URLs, no storage, CSV export |
+| Results experience (`pageResultsExperience.test.tsx`) | Classification counts, result rows and timestamps, result-key navigation, loading focus, completion and error focus recovery, announcements, duplicate-submission prevention, reduced motion |
+| Result presentation (`scanPresentation.ts`) | Classification count summaries, retry-wait formatting, API error messages |
 | CSV export (`csvExport.ts`) | Privacy notice, 7-field output, RFC 4180 escaping, filename format |
 | Privacy notices | Wording accuracy, absence of overclaiming phrases |
 
-**Current test count:** 411 passing, 0 failing.
+**Current test count:** 508 passing, 0 failing (14 suites), with `npx tsc --noEmit` and `npm run build` succeeding.
 
 ---
 
 ## Deployment Notes
 
-### After any source code change
+### Existing deployment configuration
+
+These facts describe the current production setup:
+
+- Production runs `next start` from the production checkout's own `.next` build directory, managed by PM2 under the process name `url-activity-scanner`. PM2 file watching is not enabled.
+- There is no CI/CD pipeline. The repository has no GitHub Actions workflow, webhook, deploy key or deployment environment that builds or restarts production. The intended path to production is a build in the production checkout followed by a PM2 restart. Before relying on "push does not deploy", also check the installed GitHub Apps and any agent automations connected to the repository; repository settings alone do not show those.
+- The previous instructions were to run `npm run build` in the production directory and then `pm2 restart url-activity-scanner`. That works, but it rebuilds `.next` underneath the running server. Until the restart, the running process can serve mismatched or missing assets, and a failed build can leave no usable build behind. Avoid it unless there is a backup and a planned window.
+- A Next.js build records its absolute project path (for example in `.next/required-server-files.json`). A build created in another directory has not been verified to run from the production directory, so do not copy `.next` between checkouts.
+- Restarting resets the in-memory rate-limit counters.
+
+### Proposed safer release procedure (not yet exercised in production)
+
+The procedure below is recommended for the next release. It has **not yet been carried out against production**. Each production step needs the owner's explicit authorization and should be verified as it is performed.
+
+**Staged verification (no production impact):**
+
+1. In a separate clone at the release commit, run `npm ci`, `npm test`, `npx tsc --noEmit` and `npm run build`.
+2. Run `npm start -- -p <free port>` on `127.0.0.1` only, and check the UI in a browser with the scan API mocked. Never run real scans as part of verification.
+
+**Production steps (require authorization):**
+
+1. **Back up** the current build and source state: copy `.next` to a dated rollback directory, archive any uncommitted source files, and record `git rev-parse HEAD` and the PM2 process description.
+2. **Update the source** with a fast-forward only (`git fetch` then `git merge --ff-only origin/main`). If uncommitted local changes block the update, confirm they are already in the release commit and that the backup has them, then resolve them deliberately. Never stash or discard them blindly.
+3. **Install dependencies** with `npm ci`, but only if `package-lock.json` changed.
+4. **Build** with `npm run build` during a quiet period. If the build fails, restore the backed-up `.next` before doing anything else.
+5. **Restart** with `pm2 restart url-activity-scanner`. Run `pm2 save` only if the process definition changed.
+6. **Verify:**
+   - the loopback binding (below);
+   - `pm2 status`;
+   - HTTP 200 on the public page and its static assets;
+   - a new build ID in `.next/BUILD_ID`;
+   - a browser check against the live page with the scan API mocked;
+   - `pm2 logs url-activity-scanner` for errors.
+
+**Rollback (require authorization):**
+
+1. Restore the backed-up `.next` directory and the previous source state (`git checkout <previous HEAD>`, then restore any archived uncommitted files).
+2. Run `pm2 restart url-activity-scanner`.
+3. Confirm that `.next/BUILD_ID` matches the backed-up build and that the checks above pass.
+
+### Verifying the loopback binding
 
 ```bash
-# 1. Build
-npm run build
-
-# 2. Restart the PM2 process
-pm2 restart url-activity-scanner
-
-# 3. Verify the port is still bound to loopback only
 ss -tlnp | grep 3002
 ```
 
