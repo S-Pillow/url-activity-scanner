@@ -26,10 +26,10 @@
  *   This matches A-03 from the AIPF-001 discovery package.
  *
  * Assumption A-AIPF003-02:
- *   DNS timeout is governed by the system resolver configuration. No
- *   additional per-query timeout is added in this module. The full per-URL
- *   timeout (10 s default) will be applied at the AIPF-004 HEAD request layer
- *   and will cover the DNS phase as well when composed together.
+ *   DNS timeout is governed by the system resolver configuration. Node's
+ *   dns.promises API cannot cancel an in-flight query, so the request-scoped
+ *   AbortSignal makes this function stop awaiting it; late completion is
+ *   observed and ignored and cannot proceed to IP checks or socket creation.
  *
  * Assumption A-AIPF003-03:
  *   No DNS result caching is performed in this module. If the platform later
@@ -41,6 +41,7 @@
 import { promises as dnsPromises } from "dns";
 import { checkIpSafety } from "./ipSafety";
 import type { UrlValidationResult } from "./validateUrl";
+import { raceWithSignal, throwIfAborted } from "./cancellation";
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
@@ -112,11 +113,16 @@ async function tryResolveAAAA(hostname: string): Promise<string[]> {
  * Does not log hostnames, resolved IPs, or any part of the URL.
  *
  * @param validationResult - The structured result from validateUrl().
+ * @param options.signal - Request-scoped cancellation signal.
  * @returns A structured DnsCheckResult.
  */
 export async function resolveDns(
-  validationResult: UrlValidationResult
+  validationResult: UrlValidationResult,
+  options?: { signal?: AbortSignal }
 ): Promise<DnsCheckResult> {
+  const signal = options?.signal;
+  throwIfAborted(signal);
+
   const { originalInput, normalizedUrl, hostname, scheme } = validationResult;
 
   // ── Step 1: Gate — do not proceed if AIPF-002 did not pass ───────────────
@@ -158,10 +164,17 @@ export async function resolveDns(
   // ENOTFOUND, ETIMEOUT, ESERVFAIL, etc.) are silently swallowed by
   // tryResolveA / tryResolveAAAA — an empty array signals "no records".
   // This is intentional: we care about what resolved, not why something failed.
-  const [ipv4s, ipv6s] = await Promise.all([
-    tryResolveA(hostname),
-    tryResolveAAAA(hostname),
-  ]);
+  const [ipv4s, ipv6s] = await raceWithSignal(
+    Promise.all([
+      tryResolveA(hostname),
+      tryResolveAAAA(hostname),
+    ]),
+    signal
+  );
+
+  // Node's dns.promises resolver has no AbortSignal support. A late completion
+  // must never proceed into IP policy checks or socket creation.
+  throwIfAborted(signal);
 
   const resolvedIps: string[] = [...ipv4s, ...ipv6s];
 
@@ -184,6 +197,7 @@ export async function resolveDns(
   // This prevents split-horizon DNS attacks where one of several resolved IPs
   // points to an internal address.
   for (const ip of resolvedIps) {
+    throwIfAborted(signal);
     const blockReason = checkIpSafety(ip);
     if (blockReason !== null) {
       return makeDnsResult({

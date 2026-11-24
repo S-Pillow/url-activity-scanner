@@ -37,11 +37,10 @@
  *   must ensure the correct headers are forwarded. No IP is logged.
  *
  * Assumption A-AIPF008-04 — Batch timeout behaviour:
- *   When the batch exceeds maxBatchRuntimeMs, the handler returns BATCH_TIMEOUT
- *   immediately. The underlying scan promises continue running in the Node.js
- *   event loop until they settle naturally. Their results are discarded.
- *   Proper per-promise cancellation (via AbortController) requires changes to
- *   AIPF-004/005 and is deferred to a future ticket.
+ *   One batch-scoped AbortController enforces maxBatchRuntimeMs. Its signal is
+ *   propagated through the worker queue, DNS, HEAD, redirects, and GET fallback.
+ *   Timeout therefore stops scheduling and active outbound HTTP(S) work rather
+ *   than merely stopping the caller-visible response.
  *
  * Assumption A-AIPF008-05 — Blank URL entries:
  *   URL entries that are blank after trimming are rejected with
@@ -66,6 +65,11 @@ import { rateLimiter as defaultRateLimiter } from "../security/rateLimiter";
 import type { RateLimitResult, RateLimiterConfig } from "../security/rateLimiter";
 import type { ScanResult } from "../security/resultMapper";
 import type { GetFallbackResult } from "../security/getFallback";
+import {
+  isScanAbortError,
+  ScanAbortError,
+  throwIfAborted,
+} from "../security/cancellation";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -188,7 +192,8 @@ function extractClientIp(
  */
 async function runWithConcurrency<T>(
   tasks: ReadonlyArray<() => Promise<T>>,
-  concurrency: number
+  concurrency: number,
+  signal: AbortSignal
 ): Promise<T[]> {
   const results = new Array<T>(tasks.length);
   let nextIndex = 0;
@@ -196,10 +201,23 @@ async function runWithConcurrency<T>(
   async function worker(): Promise<void> {
     // eslint-disable-next-line no-constant-condition
     while (true) {
-      // nextIndex++ is atomic in single-threaded JS — no race condition.
-      const index = nextIndex++;
+      // Stop before claiming a queued task. nextIndex remains the count of
+      // tasks actually claimed, so unstarted work is not consumed on abort.
+      if (signal.aborted) return;
+
+      const index = nextIndex;
       if (index >= tasks.length) break;
-      results[index] = await tasks[index]();
+      nextIndex++;
+
+      // Close the narrow abort boundary between claim and invocation.
+      if (signal.aborted) return;
+
+      try {
+        results[index] = await tasks[index]();
+      } catch (error) {
+        if (signal.aborted || isScanAbortError(error)) return;
+        throw error;
+      }
     }
   }
 
@@ -213,20 +231,44 @@ async function runWithConcurrency<T>(
 }
 
 /**
- * Races `promise` against a wall-clock timeout.
- * Throws `BatchTimeoutError` if the timeout fires first.
+ * Executes the worker pool under a real cancellation deadline.
  *
- * Per A-AIPF008-04: the underlying promise continues after a timeout.
+ * Promise.race remains only to preserve prompt caller-visible timeout semantics
+ * if an underlying platform primitive cannot stop synchronously. The timer also
+ * aborts the shared controller, which is the actual execution boundary.
  */
-function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
-  let handle: ReturnType<typeof setTimeout>;
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    handle = setTimeout(() => reject(new BatchTimeoutError()), ms);
+async function runWithDeadline<T>(
+  pool: Promise<T>,
+  controller: AbortController,
+  ms: number
+): Promise<T> {
+  let handle: ReturnType<typeof setTimeout> | undefined;
+  let removeAbortListener: (() => void) | undefined;
+
+  const deadline = new Promise<never>((_, reject) => {
+    const onAbort = (): void => reject(new BatchTimeoutError());
+    controller.signal.addEventListener("abort", onAbort, { once: true });
+    removeAbortListener = () =>
+      controller.signal.removeEventListener("abort", onAbort);
+
+    handle = setTimeout(() => {
+      if (!controller.signal.aborted) {
+        controller.abort(new BatchTimeoutError());
+      }
+    }, ms);
   });
-  return Promise.race([promise, timeoutPromise]).then(
-    (v) => { clearTimeout(handle); return v; },
-    (e) => { clearTimeout(handle); throw e; }
-  );
+
+  try {
+    const result = await Promise.race([pool, deadline]);
+    if (controller.signal.aborted) throw new BatchTimeoutError();
+    return result;
+  } finally {
+    if (handle) clearTimeout(handle);
+    removeAbortListener?.();
+    // Promise.race installs rejection handlers on pool. Keep an explicit
+    // handler as documentation/defence against late non-cooperative failures.
+    void pool.catch(() => {});
+  }
 }
 
 /**
@@ -255,8 +297,13 @@ function makeFallbackScanResult(rawInput: string): ScanResult {
  * No submitted URL, domain, resolved IP, response header, or response body is
  * stored, logged, or included in the returned ScanResult.
  */
-async function scanUrl(rawInput: string): Promise<ScanResult> {
+async function scanUrl(
+  rawInput: string,
+  signal: AbortSignal
+): Promise<ScanResult> {
   try {
+    throwIfAborted(signal);
+
     // ── AIPF-002: URL validation (SSRF gate) ──────────────────────────────────
     const validationResult = validateUrl(rawInput);
     if (!validationResult.allowed) {
@@ -264,27 +311,34 @@ async function scanUrl(rawInput: string): Promise<ScanResult> {
     }
 
     // ── AIPF-003: DNS resolution ───────────────────────────────────────────────
-    const dnsResult = await resolveDns(validationResult);
+    const dnsResult = await resolveDns(validationResult, { signal });
+    throwIfAborted(signal);
     if (!dnsResult.allowed) {
       return mapResult({ validationResult, dnsResult });
     }
 
     // ── AIPF-004: HEAD request ────────────────────────────────────────────────
-    const headResult = await sendHeadRequest(dnsResult);
+    const headResult = await sendHeadRequest(dnsResult, { signal });
+    throwIfAborted(signal);
 
     // ── AIPF-005: GET fallback (only after HEAD 405 or 501) ───────────────────
     let getFallbackResult: GetFallbackResult | undefined;
     if (
+      !signal.aborted &&
       headResult.statusCode !== null &&
       GET_TRIGGER_CODES.has(headResult.statusCode)
     ) {
-      getFallbackResult = await runGetFallback(headResult);
+      getFallbackResult = await runGetFallback(headResult, { signal });
+      throwIfAborted(signal);
     }
 
     // ── AIPF-006: Final result mapping ────────────────────────────────────────
     return mapResult({ validationResult, dnsResult, headResult, getFallbackResult });
 
-  } catch {
+  } catch (error) {
+    if (signal.aborted || isScanAbortError(error)) {
+      throw new ScanAbortError();
+    }
     // Unexpected error in the scan pipeline — return safe fallback (A-AIPF008-06).
     return makeFallbackScanResult(rawInput);
   }
@@ -326,6 +380,8 @@ export async function handleBatchScan(
     _rateLimiter?: RateLimiterLike;
     /** @internal — override maxBatchRuntimeMs in tests. */
     _timeoutMs?: number;
+    /** @internal — inject per-URL work for scheduler cancellation tests. */
+    _scanUrl?: (url: string, signal: AbortSignal) => Promise<ScanResult>;
   }
 ): Promise<BatchScanResponse> {
   const limiter: RateLimiterLike = opts?._rateLimiter ?? defaultRateLimiter;
@@ -415,10 +471,20 @@ export async function handleBatchScan(
     // ── Step 7: Batch scan with concurrency pool + wall-clock timeout ─────────
     const { maxConcurrentUrlsPerBatch } = rlResult.limits;
     const timeoutMs = opts?._timeoutMs ?? rlResult.limits.maxBatchRuntimeMs;
+    const controller = new AbortController();
+    const scanOne = opts?._scanUrl ?? scanUrl;
 
-    const tasks = urls.map((url) => () => scanUrl(url));
-    const results = await withTimeout(
-      runWithConcurrency(tasks, maxConcurrentUrlsPerBatch),
+    const tasks = urls.map(
+      (url) => () => scanOne(url, controller.signal)
+    );
+    const pool = runWithConcurrency(
+      tasks,
+      maxConcurrentUrlsPerBatch,
+      controller.signal
+    );
+    const results = await runWithDeadline(
+      pool,
+      controller,
       timeoutMs
     );
 
